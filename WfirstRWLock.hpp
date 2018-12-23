@@ -1,0 +1,81 @@
+
+#pragma once
+
+// from https://blog.csdn.net/mymodian9612/article/details/52794980
+
+#include <condition_variable>
+#include <mutex>
+
+class WfirstRWLock {
+public:
+	void lock_read() {
+		std::unique_lock<std::mutex> ulk(counter_mutex);
+		cond_r.wait(ulk, [=]() {return 0 == write_cnt; });
+		++read_cnt;
+	}
+
+	void release_read() {
+		std::unique_lock<std::mutex> ulk(counter_mutex);
+		if (--read_cnt == 0 && write_cnt > 0)
+			cond_w.notify_one();
+	}
+
+	void lock_write() {
+		std::unique_lock<std::mutex> ulk(counter_mutex);
+		++write_cnt;
+		cond_w.wait(ulk, [=]() {return read_cnt == 0 && !inwriteflag; });
+		inwriteflag = true;
+	}
+
+	void release_write() {
+		std::unique_lock<std::mutex> ulk(counter_mutex);
+		if (--write_cnt == 0)
+			cond_r.notify_all();
+		else
+			cond_w.notify_one();
+		inwriteflag = false;
+	}
+private:
+	volatile size_t read_cnt = 0;
+	volatile size_t write_cnt = 0;
+	volatile bool inwriteflag = false;
+	std::mutex counter_mutex;
+	std::condition_variable cond_r, cond_w;
+};
+
+template<typename _RWLockable>
+class unique_writeguard {
+public:
+	explicit unique_writeguard(_RWLockable& rw_lockable) : rw_lockable_(rw_lockable) {
+		rw_lockable_.lock_write();
+	}
+	~unique_writeguard() {
+		rw_lockable_.release_write();
+	}
+private:
+	unique_writeguard() = delete;
+	unique_writeguard(unique_writeguard const&) = delete;
+	unique_writeguard& operator=(unique_writeguard const&) = delete;
+	_RWLockable& rw_lockable_;
+};
+
+template <typename _RWLockable>
+class unique_readguard
+{
+public:
+	explicit unique_readguard(_RWLockable &rw_lockable)
+		: rw_lockable_(rw_lockable)
+	{
+		rw_lockable_.lock_read();
+	}
+	~unique_readguard()
+	{
+		rw_lockable_.release_read();
+	}
+private:
+	unique_readguard() = delete;
+	unique_readguard(const unique_readguard&) = delete;
+	unique_readguard& operator=(const unique_readguard&) = delete;
+private:
+	_RWLockable &rw_lockable_;
+};
