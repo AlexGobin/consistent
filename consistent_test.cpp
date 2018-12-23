@@ -21,6 +21,7 @@ public:
 int main(){
 	using namespace consistent;
 
+	Config<>{ Config<>::Hasher(), 71, 30, 1.5, };
 	auto config = Config<TestHasher>{ TestHasher(), 71, 30, 1.5, };
 
 	std::vector<ServerNode> members;

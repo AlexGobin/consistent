@@ -76,6 +76,14 @@ namespace consistent {
 		ErrInsufficientMemberCount,
 		ErrMemberNotFound,
 	};
+
+	class DefaultHasher {
+	public:
+		uint64_t Sum64(void const* data, size_t size) const {
+			return std::hash<std::string>{}(std::string((char const*)data, size));
+		}
+	};
+
 	/// Config represents a structure to control consistent package.
 
 	// Hasher is responsible for generating unsigned, 64 bit hash of provided byte slice.
@@ -83,7 +91,7 @@ namespace consistent {
 	// and while performance is also important fast functions are preferable (i.e.
 	// you can use FarmHash family).
 	// Hasher 必须有函数 uint64_t Sum64(void const* data, size_t size)
-	template<typename Hasher>
+	template<typename Hasher = DefaultHasher>
 	class Config {
 	public:
 		typedef typename Hasher Hasher;
@@ -112,9 +120,7 @@ namespace consistent {
 		WfirstRWLock mu;
 
 		Config config;
-		Hasher hasher;
 		std::vector<uint64_t> sortedSet;
-		uint64_t partitionCount;
 		std::map<std::string, double>	loads;
 		std::map<std::string, Member>	members;
 		std::map<int, Member*>			partitions;
@@ -122,12 +128,10 @@ namespace consistent {
 	public:
 		// New creates and returns a new Consistent object.
 		Consistent(std::vector<Member> const& _members, Config const& _config) 
-			: config(_config)
-			, partitionCount(config.PartitionCount)
-			, hasher(config.hasher) {
+			: config(_config) {
 
 			// TODO: Check configuration here
-;
+
 			for (auto const& member : _members) {
 				add(member);
 			}
@@ -148,7 +152,7 @@ namespace consistent {
 		}
 		// AverageLoad exposes the current average load.
 		double AverageLoad()const {
-			double avgLoad = double(partitionCount / members.size()) * config.Load;
+			double avgLoad = double(config.PartitionCount / members.size()) * config.Load;
 			return ceil(avgLoad);
 		}
 
@@ -176,9 +180,11 @@ namespace consistent {
 			}
 
 			for (int i = 0; i < config.ReplicationFactor; ++i) {
-				char key[128];
-				sprintf(key, "%s%d", name.c_str(), i);
-				auto h =hasher.Sum64(key, strlen(key));
+				std::stringstream ss;
+				ss << name << i;
+				std::string key = ss.str();
+				auto h = config.hasher.Sum64(key.data(), key.length());
+
 				ring.erase(h);
 				delSlice(h);
 			}
@@ -202,8 +208,8 @@ namespace consistent {
 
 		// FindPartitionID returns partition id for given key.
 		int FindPartitionID(std::string const& key) const {
-			auto hkey = hasher.Sum64(key.c_str(), key.length());
-			return int(hkey % partitionCount);
+			auto hkey = config.hasher.Sum64(key.c_str(), key.length());
+			return int(hkey % config.PartitionCount);
 		}
 
 		// GetPartitionOwner returns the owner of the given partition.
@@ -238,14 +244,14 @@ namespace consistent {
 
 	private:
 		/// @param idx sortedSet的下标
-		void distributeWithLoad(int partID, int idx, std::map<int, Member*>& partitions, std::map<std::string, double>& loads) {
+		bool distributeWithLoad(int partID, int idx, std::map<int, Member*>& partitions, std::map<std::string, double>& loads) {
 			auto avgLoad = AverageLoad();
 			int count = 0;
 			for (;;) {
 				if (++count >= sortedSet.size()) {
 					// User needs to decrease partition count, increase member count or increase load factor.
 					assert(false && "not enough room to distribute partitions");
-					return;
+					return false;
 				}
 				auto i = sortedSet[idx];
 				auto member = ring[i];
@@ -255,21 +261,31 @@ namespace consistent {
 				if (load + 1 <= avgLoad) {
 					partitions[partID] = member;
 					++loads[member_name];
-					return;
+					return true;
 				}
 				
 				if (++idx >= sortedSet.size()) {
 					idx = 0;
 				}
 			}
+			assert(false);
+			return false;
 		}
 
 		void distributePartitions() {
 			std::map<std::string, double> loads;
 			std::map<int, Member*> partitions;
 
-			for (uint64_t partID = 0; partID < partitionCount; ++partID) {				
-				auto key = hasher.Sum64(&partID, sizeof(partID));
+			assert(members.size() * config.ReplicationFactor == sortedSet.size());
+			if (members.size() * config.ReplicationFactor == ring.size()) {
+				// 无hash冲突
+			}
+			else {
+				assert(false && "hash冲突");
+			}
+
+			for (uint64_t partID = 0; partID < config.PartitionCount; ++partID) {				
+				auto key = config.hasher.Sum64(&partID, sizeof(partID));
 				auto be = sortedSet.begin(), en = sortedSet.end();
 				auto it = std::lower_bound(be, en, key);
 				auto idx = it == en ? 0 : it - be;
@@ -287,9 +303,9 @@ namespace consistent {
 			auto pmember = &members[member_name];
 			for (int i = 0; i < config.ReplicationFactor; ++i) {
 				std::stringstream ss;
-				ss << member.String() << i;
+				ss << member_name << i;
 				std::string key = ss.str();
-				auto h = hasher.Sum64(key.data(), key.length());
+				auto h = config.hasher.Sum64(key.data(), key.length());
 				ring[h] = pmember;
 				sortedSet.push_back(h);
 			}
@@ -317,10 +333,10 @@ namespace consistent {
 			// Hash and sort all the names.
 			std::vector<uint64_t> keys;
 			std::map<uint64_t, Member const*> kmems;
-			for (auto it = members.begin(), en = members.end(); it != en; ++it) {
-				std::string const& name = it->first; 
-				Member const& member = it->second;
-				auto key = hasher.Sum64(name.c_str(), name.length());
+			for (auto const& it : members) {
+				std::string const& name = it.first; 
+				Member const& member = it.second;
+				auto key = config.hasher.Sum64(name.c_str(), name.length());
 				if (name == owner.String()) {
 					ownerKey = key;
 				}
